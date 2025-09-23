@@ -1,4 +1,5 @@
 import os, re, time, csv, json, pickle, logging, imaplib, email, requests
+from email.utils import parsedate_to_datetime
 from collections import defaultdict
 from bs4 import BeautifulSoup
 import pathlib, dotenv
@@ -93,7 +94,20 @@ def parse_config(p):
         logger.info(f'Loaded {len(cfgs)} rules')
         return cfgs
 
-def extract(text, sender, subj, cfgs):
+def message_timestamp(msg):
+    raw = msg.get('Date') if msg else ''
+    if not raw:
+        return ''
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt.tzinfo:
+            dt = dt.astimezone()
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return ''
+
+
+def extract(text, sender, subj, cfgs, email_ts=''):
     out = []
     for c in cfgs:
         if c.get('email_address') and c['email_address'] not in sender:
@@ -121,11 +135,14 @@ def extract(text, sender, subj, cfgs):
 
             g['rest'] = rest
             loc = g.copy()
+            loc.setdefault('email_ts', email_ts)
             for k, expr in c['field_map'].items():
                 try:
                     loc[k] = eval(expr, {}, loc)
                 except Exception:
                     loc[k] = ''
+            if email_ts and not loc.get('ts'):
+                loc['ts'] = email_ts
             out.append({**c, **loc})
     return out
 
@@ -181,7 +198,8 @@ def process_box(conn, done, cfgs):
             frm = msg.get('From', '')
             subj = msg.get('Subject', '')
             txt = body(msg)
-            logs = aggregate_logs(extract(txt, frm, subj, cfgs))
+            msg_ts = message_timestamp(msg)
+            logs = aggregate_logs(extract(txt, frm, subj, cfgs, msg_ts))
             if not logs:
                 log_decision(uid, frm, subj, None, False, 'no rule')
                 continue

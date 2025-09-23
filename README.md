@@ -1,40 +1,118 @@
-# 0. Создать попку репозитория. Допустим C:\Folder
-Будущая структура:
+# Bridges Watcher
+
+Этот проект автоматически проверяет почтовый ящик, парсит входящие письма по заданным шаблонам и отправляет отформатированные уведомления в Slack.
+
+## Структура репозитория
+```
 C:\Folder\
-    ├─ code.py
-    ├─ .env
-    ├─ run.bat
-    └─ (будут создаваться) log.log, uid.pkl и др.
-	
-# 1. Подготавливаем код проекта и помещаем в файл code.py
+    ├─ code.py           # основной файл скрипта
+    ├─ .env              # переменные окружения
+    ├─ run.bat           # батник для запуска
+    ├─ parser_config.csv # конфигурация парсера почты
+    └─ (создаётся автоматически) log.log, uid.pkl и др.
+```
 
-# 2. Установить Python
+## Установка и запуск
 
-# 3. Найти папку с исполняемым файлом Python.exe (cmd -> where python)
+### 1. Подготовка окружения
+1. Создайте рабочую папку репозитория, например `C:\Folder`.
+2. Поместите содержимое проекта в файл `code.py` в этой папке.
+3. Установите Python (желательно 3.10+).
+4. Определите путь до `python.exe` (в командной строке: `where python`).
+5. Установите зависимости в командной строке от имени администратора (или из той же директории, где находится `python.exe`):
+   ```cmd
+   pip install boto3 requests beautifulsoup4
+   ```
+   Если Python не добавлен в `PATH`, выполните команду с полным путём, например:
+   ```cmd
+   C:\Users\User\AppData\Local\Programs\Python\Python313\python.exe -m pip install boto3 requests beautifulsoup4
+   ```
+6. Если `pip` не установлен, скачайте `get-pip.py` с https://bootstrap.pypa.io/get-pip.py и установите его.
 
-# 4. Установить зависимости в CMD от имени администратора или в той же директории Python, где его исполняемый файл: pip install boto3 requests beautifulsoup4
-- добавить Python в PATH 
-или использовать такую команду:
-C:\Users\d.pascenco\AppData\Local\Programs\Python\Python313\python.exe -m pip install boto3 requests beautifulsoup4
-
-# 5. Если pip не установлен, Скачать get-pip.py отсюда: https://bootstrap.pypa.io/get-pip.py
-
-# 6. Содать файл с названием .env и поместить туда креды. Пример:
-IMAP_HOST=imap.example.com  (настройки IMAP)
-IMAP_USER=user@example.com  (настройки IMAP)
-IMAP_PASS=password123 (настройки IMAP)
+### 2. Настройка переменных окружения
+Создайте файл `.env` в корне репозитория и укажите параметры подключения и работы:
+```
+IMAP_HOST=imap.example.com
+IMAP_USER=user@example.com
+IMAP_PASS=password123
 SLACK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
-UID_OBJECT_KEY=uid.pkl (это мой файл уникальных идентификаторов объектов в списках)
-CHECK_SEC=10 (частота итераций)
+UID_OBJECT_KEY=uid.pkl
+CHECK_SEC=10
+```
 
-# 7. Для запуска в run.bat указываем:
+### 3. Скрипт запуска (run.bat)
+Сохраните в `run.bat` следующий сценарий:
+```bat
 @echo off
 cd /d "C:\Folder"
 for /f "delims=" %%a in (.env) do set %%a
-"C:\Users\d.pascenco\AppData\Local\Programs\Python\Python313\python.exe" code.py
+"C:\Users\User\AppData\Local\Programs\Python\Python313\python.exe" code.py
+```
 
-# 8. Запуск: C:\Folder\run.bat
+### 4. Ручной запуск
+Запустите `C:\Folder\run.bat` двойным кликом или из командной строки.
 
-# 9. Создаем расписание в windows scheduler: Win+R -> taskschd.msc -> Actions - > Create task -- заполняем конфигруацию таска.
+### 5. Планировщик задач Windows
+1. Откройте планировщик (`Win + R` → `taskschd.msc`).
+2. Создайте новую задачу (`Create Task`) и настройте триггеры/действия.
+3. В действиях укажите запуск `C:\Folder\run.bat`.
+4. Для проверки запустите задачу вручную или выполните `C:\Folder\run.bat` в CMD.
 
-# 10. запускаем вручную через cmd C:\Folder\run.bat
+## Настройка `parser_config.csv`
+Файл `parser_config.csv` определяет шаблоны для разбора писем и формирование сообщений в Slack. Каждая строка описывает один шаблон.
+
+### Обязательные поля
+1. **name** — уникальное имя шаблона (для логов и отладки). Пример: `xcore_log`.
+2. **pattern** — регулярное выражение с именованными группами (`?P<имя>...`), применяется ко всему телу письма.
+   Пример:
+   ```regex
+   (?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+\[(?P<lvl>[A-Z]+)\]\s+(?P<rest>.*?)
+   ```
+3. **field_map** — JSON-словарь с Python-выражениями (`eval`), позволяющий вычислять дополнительные поля из уже найденных данных.
+   Пример:
+   ```json
+   {"stat": "rest.split(':')[1].strip() if ':' in rest else ''"}
+   ```
+4. **slack_format** — шаблон итогового сообщения для Slack. Строки разделяются `\n`, подстановки выполняются по именам полей.
+   Пример:
+   ```text
+   CATEGORY: XCORE\nTIMESTAMP: {ts}\nLEVEL: {lvl}\nSTATUS: {stat}\nEVENT_TEXT:\n{rest}
+   ```
+
+### Необязательные поля
+5. **note** — произвольный комментарий, который добавляется к сообщению в Slack (скрипт автоматически добавляет префикс `*ACTIONS:*`).
+6. **exclude_fields** — список полей, которые не отображаются в Slack. Перечисляются через запятую без пробелов (пример: `stat,ts`).
+7. **email_address** — фильтр по адресу отправителя (`msg.get("From")`). Поддерживает подстроки. Примеры: `alerts@domain.com`, `@mycompany.com`.
+8. **email_theme** — RegEx-фильтр по теме письма (`Subject`). Пример: `^XCORE Alert.*`.
+9. **strip_pattern** — RegEx, который удаляется из тела письма до поиска `pattern` (очищает подписи, футеры, трек-коды). Работает как «глобальный remove».
+10. **truncate_pattern** — RegEx, который ищется внутри `{rest}`; всё после совпадения обрезается. Полезно для удаления повторяющихся хвостов.
+
+### Пример строки в CSV
+```
+xcore_log,"(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+\[(?P<lvl>[A-Z]+)\s*\]\s+(?P<comp>[^:]+):\s*(?P<rest>.*?)(?=(\d{4}-\d{2}-\d{2} \d{2}|\Z))","{""stat"": ""rest.split(':')[1].strip() if ':' in rest else ''""}","*CATEGORY:* XCORE\n*TIMESTAMP:* {ts}\n*LEVEL:* {lvl}\n*STATUS:* {stat}\n*EVENT_TEXT:*\n```\n{rest}\n```",,,,,"this\s*alert\s*has\s*been\s*automatically\s*generated[\s\S]*","\d{4}-\d{2}-\d{2} \d{2}"
+```
+
+### Общие рекомендации
+- Для сложных значений (например, `pattern` или `field_map`) используйте двойные кавычки.
+- `field_map` должен содержать корректный JSON-объект.
+- Поля `slack_format` и `note` поддерживают `\n` для переноса строк.
+- Фильтры `email_address` и `email_theme` применяются до поиска `pattern`.
+- В `slack_format` доступны данные из `groupdict` (результат `pattern`) и все вычисленные поля из `field_map`.
+- В сообщении Slack разрешён стандартный mrkdwn (`*bold*`, кодовые блоки ``` и др.). Последовательность `\n` превращается в перевод строки.
+- Поля из `exclude_fields` исключаются до форматирования; если исключённое поле используется в `slack_format`, будет ошибка `KeyError`.
+- Если в письме несколько совпадений для одного шаблона, `{rest}` агрегируется через `\n` и отправляется одним сообщением.
+
+### Пример сообщения в Slack
+```
+> CATEGORY: XCORE
+> TIMESTAMP: 2024-07-10 12:34:56.789
+> LEVEL: ERROR
+> STATUS: critical system timeout
+> EVENT_TEXT:
+Job failed: critical system timeout
+> ACTIONS: какая-то запись (или отсутствие).
+```
+
+## Дополнительно
+- Логи (`log.log`) и файл уникальных идентификаторов (`uid.pkl`) создаются автоматически в корневой папке.
+- Для отладки смотрите вывод скрипта и журнал в Slack.
