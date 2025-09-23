@@ -1,4 +1,5 @@
 import os, re, time, csv, json, pickle, logging, imaplib, email, requests
+from email.utils import parsedate_to_datetime
 from collections import defaultdict
 from bs4 import BeautifulSoup
 import pathlib, dotenv
@@ -47,12 +48,28 @@ def save_uids(u):
         logger.exception('uid save')
 
 def slack(msg):
+    raw_url = ENV.get('SLACK_URL') or ''
+    url = raw_url.strip().strip('"').strip("'")
+    if not url:
+        logger.warning('slack skipped: no webhook url configured')
+        return False
+    if url != raw_url:
+        logger.debug('slack webhook url normalised (whitespace trimmed)')
     try:
-        r = requests.post(ENV['SLACK_URL'], json={'text': msg}, timeout=10)
+        r = requests.post(url, json={'text': msg}, timeout=10)
         r.raise_for_status()
         return True
+    except requests.exceptions.HTTPError as exc:
+        payload = ''
+        if exc.response is not None:
+            payload = (exc.response.text or '').strip()
+        logger.error('slack err status=%s payload=%s', getattr(exc.response, 'status_code', 'no-status'), payload)
+        return False
+    except requests.exceptions.RequestException:
+        logger.exception('slack err request-exception')
+        return False
     except Exception:
-        logger.exception('slack err')
+        logger.exception('slack err unexpected')
         return False
 
 def html2text(html):
@@ -72,11 +89,38 @@ def body(msg):
     t = raw.decode(errors='replace')
     return t if msg.get_content_type() == 'text/plain' else html2text(t)
 
+def kv_blocks(text, start_key='message', keys=None):
+    keys = keys or ('message', 'consumer', 'grafana_folder', 'instance', 'priority')
+    blocks = []
+    current = {}
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or ':' not in stripped:
+            continue
+        key, value = stripped.split(':', 1)
+        key_norm = key.strip().lower()
+        if key_norm == start_key and current:
+            blocks.append(current)
+            current = {}
+        if key_norm in keys:
+            current[key_norm] = value.strip()
+    if current:
+        blocks.append(current)
+    return blocks
+
+EVAL_GLOBALS = {
+    '__builtins__': __builtins__,
+    'kv_blocks': kv_blocks,
+}
+
 def parse_config(p):
     with open(p, 'r', encoding='utf-8') as f:
         sample = f.read(4096)
         f.seek(0)
         dialect = csv.Sniffer().sniff(sample, delimiters=',;\t')
+        if getattr(dialect, 'quotechar', '"') != '"':
+            dialect.quotechar = '"'
+            dialect.doublequote = True
         reader = csv.DictReader(f, dialect=dialect)
         cfgs = []
         for r in reader:
@@ -93,7 +137,20 @@ def parse_config(p):
         logger.info(f'Loaded {len(cfgs)} rules')
         return cfgs
 
-def extract(text, sender, subj, cfgs):
+def message_timestamp(msg):
+    raw = msg.get('Date') if msg else ''
+    if not raw:
+        return ''
+    try:
+        dt = parsedate_to_datetime(raw)
+        if dt.tzinfo:
+            dt = dt.astimezone()
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return ''
+
+
+def extract(text, sender, subj, cfgs, email_ts=''):
     out = []
     for c in cfgs:
         if c.get('email_address') and c['email_address'] not in sender:
@@ -121,11 +178,14 @@ def extract(text, sender, subj, cfgs):
 
             g['rest'] = rest
             loc = g.copy()
+            loc.setdefault('email_ts', email_ts)
             for k, expr in c['field_map'].items():
                 try:
-                    loc[k] = eval(expr, {}, loc)
+                    loc[k] = eval(expr, EVAL_GLOBALS, loc)
                 except Exception:
                     loc[k] = ''
+            if email_ts and not loc.get('ts'):
+                loc['ts'] = email_ts
             out.append({**c, **loc})
     return out
 
@@ -181,7 +241,8 @@ def process_box(conn, done, cfgs):
             frm = msg.get('From', '')
             subj = msg.get('Subject', '')
             txt = body(msg)
-            logs = aggregate_logs(extract(txt, frm, subj, cfgs))
+            msg_ts = message_timestamp(msg)
+            logs = aggregate_logs(extract(txt, frm, subj, cfgs, msg_ts))
             if not logs:
                 log_decision(uid, frm, subj, None, False, 'no rule')
                 continue
