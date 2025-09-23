@@ -48,12 +48,24 @@ def save_uids(u):
         logger.exception('uid save')
 
 def slack(msg):
+    url = ENV.get('SLACK_URL')
+    if not url:
+        logger.warning('slack skipped: no webhook url configured')
+        return False
     try:
-        r = requests.post(ENV['SLACK_URL'], json={'text': msg}, timeout=10)
+        r = requests.post(url, json={'text': msg}, timeout=10)
+        if r.status_code == 404:
+            logger.error('slack 404: check webhook url | response=%s', (r.text or '').strip())
+            return False
         r.raise_for_status()
         return True
+    except requests.exceptions.RequestException as exc:
+        status = getattr(exc.response, 'status_code', 'no-status')
+        payload = getattr(exc.response, 'text', '') or ''
+        logger.error('slack err status=%s payload=%s', status, payload.strip())
+        return False
     except Exception:
-        logger.exception('slack err')
+        logger.exception('slack err unexpected')
         return False
 
 def html2text(html):
