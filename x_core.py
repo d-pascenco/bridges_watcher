@@ -183,6 +183,20 @@ def extract(text, sender, subj, cfgs, msg_date=''):
             diagnostics.append(f'rule={rule_name} | regex produced no matches | snippet="{clean_snippet}"')
             continue
 
+        status_hint = ''
+        status_match = re.search(r'^\s*(Active alerts|Resolved)', local_txt, re.I | re.M)
+        if status_match:
+            status_hint = status_match.group(1)
+
+        matches = list(c['pattern'].finditer(local_txt))
+        if not matches:
+            snippet = local_txt.strip()
+            if len(snippet) > 400:
+                snippet = snippet[:400] + '…'
+            clean_snippet = snippet.replace('\r', '').replace('\n', '\\n')
+            diagnostics.append(f'rule={rule_name} | regex produced no matches | snippet="{clean_snippet}"')
+            continue
+
         for idx, m in enumerate(matches, 1):
             g = m.groupdict()
             rest = g.get('rest', '')
@@ -262,24 +276,6 @@ def log_decision(uid, frm, subj, cfg, sent, why=''):
     else:
         logger.warning(f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}"{reason}')
 
-def log_skip_report(uid, frm, subj, body_text, diagnostics, msg_ts=''):
-    preview = (body_text or '').replace('\r', '')
-    preview = preview.strip()
-    limit = 1200
-    truncated = False
-    if len(preview) > limit:
-        preview = preview[:limit]
-        truncated = True
-    if truncated:
-        preview += '…'
-    diag_lines = diagnostics or ['no rule reported additional diagnostics']
-    diag_text = '\n'.join(f'  - {line}' for line in diag_lines)
-    ts_part = f' | date={msg_ts}' if msg_ts else ''
-    logger.warning(
-        f'[EMAIL] UID={uid} | SKIP DETAIL{ts_part} | from="{frm}" | subj="{subj}"\n'
-        f'BODY PREVIEW:\n{preview}\nRULE CHECKS:\n{diag_text}'
-    )
-
 # ─────────── main mailbox loop ───────────
 def process_box(conn, done, cfgs):
     logger.debug('Scanning mailbox for new emails')
@@ -309,11 +305,10 @@ def process_box(conn, done, cfgs):
             subj = decode_header_value(msg.get('Subject', ''))
             msg_ts = parse_email_ts(msg.get('Date'))
             txt = body(msg)
-            matches, diag = extract(txt, frm, subj, cfgs, msg_date=msg_ts)
+            matches, _ = extract(txt, frm, subj, cfgs, msg_date=msg_ts)
             logs = aggregate_logs(matches)
             if not logs:
                 log_decision(uid, frm, subj, None, False, 'no matching rule')
-                log_skip_report(uid, frm, subj, txt, diag, msg_ts)
                 continue
             ok = True
             for lg in logs:
