@@ -2,10 +2,12 @@ import os, re, time, csv, json, pickle, logging, imaplib, email, requests
 import argparse
 import sys
 from email.utils import parsedate_to_datetime
-from collections import defaultdict
+from collections import defaultdict, Counter
 from bs4 import BeautifulSoup
 import pathlib, dotenv
 from urllib.parse import urlparse
+import unicodedata
+import hashlib
 
 BASE        = pathlib.Path(__file__).resolve().parent
 CFG_PATH    = BASE / 'parser_config.csv'
@@ -67,17 +69,111 @@ def _slack_target_details(url):
     }
 
 
+def _describe_hidden_chars(chars):
+    if not chars:
+        return ''
+    counter = Counter(chars)
+    parts = []
+    for ch, count in counter.items():
+        code = f'U+{ord(ch):04X}'
+        try:
+            name = unicodedata.name(ch)
+        except ValueError:
+            name = 'UNKNOWN'
+        if count > 1:
+            parts.append(f'{code} {name} x{count}')
+        else:
+            parts.append(f'{code} {name}')
+    return ', '.join(parts)
+
+
+def _describe_visible_chars(chars):
+    if not chars:
+        return ''
+    seen = []
+    for ch in chars:
+        code = f'U+{ord(ch):04X}'
+        try:
+            name = unicodedata.name(ch)
+        except ValueError:
+            name = 'UNKNOWN'
+        seen.append(f"{ch!r} ({code} {name})")
+    return ', '.join(seen)
+
+
+def _normalise_slack_url(raw_url):
+    if not raw_url:
+        return '', []
+
+    trimmed = raw_url.strip().strip('"').strip("'").strip()
+    cleaned_chars = []
+    removed_chars = []
+    for ch in trimmed:
+        category = unicodedata.category(ch)
+        if ch.isspace() or category in {'Cf', 'Cc', 'Cs', 'Co'}:
+            removed_chars.append(ch)
+            continue
+        cleaned_chars.append(ch)
+    cleaned = ''.join(cleaned_chars)
+    return cleaned, removed_chars
+
+
+_SLACK_ID_RE = re.compile(r'^[A-Za-z0-9_-]+$')
+
+
+def _validate_slack_url(url):
+    if not url:
+        return False, 'webhook url empty'
+
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        return False, f'cannot parse webhook url ({exc})'
+
+    if parsed.scheme != 'https':
+        return False, f'unexpected scheme {parsed.scheme!r}'
+    if parsed.netloc != 'hooks.slack.com':
+        return False, f'unexpected host {parsed.netloc!r}'
+
+    segments = [seg for seg in parsed.path.split('/') if seg]
+    if len(segments) != 4 or segments[0] != 'services':
+        return False, 'unexpected path format'
+
+    team_id, channel_id, token = segments[1:4]
+    unexpected = []
+    for label, value in (('team', team_id), ('channel', channel_id), ('token', token)):
+        if not value:
+            return False, f'missing {label} segment'
+        if not _SLACK_ID_RE.fullmatch(value):
+            unexpected.extend([(label, ch) for ch in value if ch not in '-_' and not ch.isalnum()])
+    if unexpected:
+        bad_desc = _describe_visible_chars([ch for _, ch in unexpected])
+        return False, f'unexpected characters in segments: {bad_desc}'
+
+    return True, ''
+
+
 def _post_to_slack(url, msg):
     r = requests.post(url, json={'text': msg}, timeout=10)
     r.raise_for_status()
 
 
-def _log_http_error(exc):
+def _slack_url_fingerprint(url):
+    if not url:
+        return 'missing'
+    digest = hashlib.sha256(url.encode('utf-8')).hexdigest()
+    return digest[:16]
+
+
+def _log_http_error(exc, fingerprint=None):
     payload = ''
     status = getattr(exc.response, 'status_code', 'no-status')
     if exc.response is not None:
         payload = (exc.response.text or '').strip()
-    logger.error('slack err status=%s payload=%s', status, payload)
+    if fingerprint:
+        logger.error('slack err status=%s payload=%s fingerprint=%s', status, payload, fingerprint)
+    else:
+        logger.error('slack err status=%s payload=%s', status, payload)
 
 
 def slack(msg):
@@ -86,11 +182,30 @@ def slack(msg):
         logger.warning('slack skipped: no webhook url configured')
         return False
 
-    normalised = raw_url.strip().strip('"').strip("'")
+    normalised, removed_chars = _normalise_slack_url(raw_url)
     if normalised != raw_url:
-        logger.debug('slack webhook url normalised (whitespace/quotes trimmed)')
+        logger.debug('slack webhook url sanitised (quotes/whitespace/hidden chars trimmed)')
+    if removed_chars:
+        logger.debug('slack webhook sanitised removed_chars=%s', _describe_hidden_chars(removed_chars))
 
-    details = _slack_target_details(normalised or raw_url)
+    if not normalised:
+        logger.warning('slack skipped: webhook url empty after normalisation')
+        return False
+
+    ok, reason = _validate_slack_url(normalised)
+    if not ok:
+        logger.warning('slack skipped: %s', reason)
+        return False
+
+    try:
+        normalised.encode('ascii')
+    except UnicodeEncodeError:
+        logger.warning('slack skipped: webhook url still contains non-ASCII characters after sanitisation')
+        return False
+
+    fingerprint = _slack_url_fingerprint(normalised)
+
+    details = _slack_target_details(normalised)
     if details and logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             'slack target host=%s team=%s channel=%s token_len=%s message_chars=%s',
@@ -100,38 +215,15 @@ def slack(msg):
             details['token_len'],
             len(msg or ''),
         )
+        logger.debug('slack webhook fingerprint=%s url_len=%s', fingerprint, len(normalised))
     try:
-        _post_to_slack(raw_url, msg)
+        _post_to_slack(normalised, msg)
         return True
     except requests.exceptions.HTTPError as exc:
-        _log_http_error(exc)
-        if exc.response is not None and exc.response.status_code == 404 and normalised and normalised != raw_url:
-            logger.warning('slack send failed, retrying with normalised URL')
-            try:
-                _post_to_slack(normalised, msg)
-                logger.info('slack delivered using normalised URL')
-                return True
-            except requests.exceptions.HTTPError as retry_exc:
-                _log_http_error(retry_exc)
-                return False
-            except requests.exceptions.RequestException:
-                logger.exception('slack err request-exception on retry')
-                return False
-            except Exception:
-                logger.exception('slack err unexpected on retry')
-                return False
+        _log_http_error(exc, fingerprint=fingerprint)
         return False
     except requests.exceptions.RequestException:
         logger.exception('slack err request-exception')
-        if normalised and normalised != raw_url:
-            try:
-                _post_to_slack(normalised, msg)
-                logger.info('slack delivered using normalised URL after request exception')
-                return True
-            except requests.exceptions.HTTPError as retry_exc:
-                _log_http_error(retry_exc)
-            except Exception:
-                logger.exception('slack err unexpected on request-exception retry')
         return False
     except Exception:
         logger.exception('slack err unexpected')
@@ -382,13 +474,19 @@ def cli():
     args = parser.parse_args()
 
     if args.slack_info:
-        info = _slack_target_details(ENV.get('SLACK_URL') or '')
+        cleaned_url, removed_chars = _normalise_slack_url(ENV.get('SLACK_URL') or '')
+        if removed_chars:
+            logger.debug('slack webhook sanitised removed_chars=%s', _describe_hidden_chars(removed_chars))
+        info = _slack_target_details(cleaned_url)
         if info:
+            fingerprint = _slack_url_fingerprint(cleaned_url)
             summary = (
                 f"Slack webhook host={info['host'] or 'unknown'} "
                 f"team={info['team'] or 'unknown'} "
                 f"channel={info['channel'] or 'unknown'} "
-                f"token_len={info['token_len']}"
+                f"token_len={info['token_len']} "
+                f"fingerprint={fingerprint} "
+                f"url_len={len(cleaned_url)}"
             )
         else:
             summary = 'Slack webhook summary unavailable (missing or invalid URL).'
