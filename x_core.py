@@ -16,6 +16,15 @@ logging.basicConfig(filename=LOG_PATH, level=logging.DEBUG, encoding='utf-8',
                     format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger()
 
+# ─────────── logging helpers ───────────
+def debug_log(message):
+    """Emit debug messages only when DEBUG_EMAIL=1."""
+    try:
+        if ENV.get('DEBUG_EMAIL'):
+            logger.debug(message)
+    except Exception:
+        logger.debug(message)
+
 # ─────────── .env hot-load ───────────
 def load_env():
     if ENV_PATH.exists():
@@ -130,19 +139,35 @@ def parse_config(p):
 def extract(text, sender, subj, cfgs, msg_date=''):
     out = []
     for c in cfgs:
+        rule_name = c.get('name', '<unnamed>')
+        debug_log(f'rule={rule_name} | checking filters for sender="{sender}" subject="{subj}"')
+
         if c.get('email_address') and c['email_address'] not in sender:
+            debug_log(f'rule={rule_name} | skipped: email_address filter "{c["email_address"]}" not in "{sender}"')
             continue
         if c.get('email_theme') and not c['email_theme'].search(subj or ''):
+            debug_log(f'rule={rule_name} | skipped: email_theme {c["email_theme"].pattern!r} does not match subject="{subj}"')
             continue
 
         local_txt = c['strip_pattern'].sub('', text) if c.get('strip_pattern') else text
+        if c.get('strip_pattern') and ENV.get('DEBUG_EMAIL'):
+            debug_log(f'rule={rule_name} | strip_pattern removed tail: len(text) {len(text)} -> {len(local_txt)}')
 
         status_hint = ''
         status_match = re.search(r'^\s*(Active alerts|Resolved)', local_txt, re.I | re.M)
         if status_match:
             status_hint = status_match.group(1)
 
-        for m in c['pattern'].finditer(local_txt):
+        matches = list(c['pattern'].finditer(local_txt))
+        debug_log(f'rule={rule_name} | regex matches found: {len(matches)}')
+        if not matches:
+            snippet = local_txt.strip()
+            if len(snippet) > 400:
+                snippet = snippet[:400] + '…'
+            debug_log(f'rule={rule_name} | no match preview: {snippet.replace(chr(10), "\\n")}')
+            continue
+
+        for idx, m in enumerate(matches, 1):
             g = m.groupdict()
             rest = g.get('rest', '')
 
@@ -157,6 +182,7 @@ def extract(text, sender, subj, cfgs, msg_date=''):
             rest = rest.strip()
             generates_rest = 'rest' in c.get('field_map', {})
             if not rest and not generates_rest:
+                debug_log(f'rule={rule_name} | match {idx}: empty rest and no generator, skipping')
                 continue
 
             g['rest'] = rest
@@ -170,11 +196,14 @@ def extract(text, sender, subj, cfgs, msg_date=''):
                 try:
                     loc[k] = eval(expr, {}, loc)
                 except Exception:
+                    debug_log(f'rule={rule_name} | match {idx}: field_map key={k} failed for expr={expr!r}')
                     loc[k] = ''
             if isinstance(loc.get('rest'), str):
                 loc['rest'] = loc['rest'].strip()
             if not loc.get('rest'):
+                debug_log(f'rule={rule_name} | match {idx}: rest empty after processing, skipping')
                 continue
+            debug_log(f'rule={rule_name} | match {idx}: fields keys={sorted(loc.keys())}')
             out.append({**c, **loc})
     return out
 
@@ -192,6 +221,7 @@ def aggregate_logs(logs):
             base = grp[0].copy()
             base['rest'] = "\n".join(x['rest'] for x in grp)
             res.append(base)
+    debug_log(f'aggregate_logs | input={len(logs)} grouped={len(res)}')
     return res
 
 # ─────────── slack format ───────────
@@ -241,6 +271,7 @@ def process_box(conn, done, cfgs):
             subj = decode_header_value(msg.get('Subject', ''))
             msg_ts = parse_email_ts(msg.get('Date'))
             txt = body(msg)
+            debug_log(f'email UID={uid} | body preview: {txt[:400].replace(chr(10), "\\n")}')
             logs = aggregate_logs(extract(txt, frm, subj, cfgs, msg_date=msg_ts))
             if not logs:
                 log_decision(uid, frm, subj, None, False, 'no matching rule')
