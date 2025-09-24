@@ -174,15 +174,6 @@ def extract(text, sender, subj, cfgs, msg_date=''):
         if status_match:
             status_hint = status_match.group(1)
 
-        matches = list(c['pattern'].finditer(local_txt))
-        if not matches:
-            snippet = local_txt.strip()
-            if len(snippet) > 400:
-                snippet = snippet[:400] + '…'
-            clean_snippet = snippet.replace('\r', '').replace('\n', '\\n')
-            diagnostics.append(f'rule={rule_name} | regex produced no matches | snippet="{clean_snippet}"')
-            continue
-
         status_hint = ''
         status_match = re.search(r'^\s*(Active alerts|Resolved)', local_txt, re.I | re.M)
         if status_match:
@@ -273,8 +264,18 @@ def log_decision(uid, frm, subj, cfg, sent, why=''):
     reason = f' | reason={why}' if why else ''
     if sent:
         logger.debug(f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}"{reason}')
-    else:
+        return
+
+    benign_skip_reasons = {
+        'no matching rule',
+        'filtered by address',
+        'filtered by subject',
+    }
+
+    if why and why not in benign_skip_reasons:
         logger.warning(f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}"{reason}')
+    else:
+        logger.debug(f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}"{reason}')
 
 # ─────────── main mailbox loop ───────────
 def process_box(conn, done, cfgs):
