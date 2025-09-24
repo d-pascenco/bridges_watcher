@@ -150,15 +150,18 @@ def parse_config(p):
 
 def extract(text, sender, subj, cfgs, msg_date=''):
     out = []
+    diagnostics = []
     for c in cfgs:
         rule_name = c.get('name', '<unnamed>')
         debug_log(f'rule={rule_name} | checking filters for sender="{sender}" subject="{subj}"')
 
         if c.get('email_address') and c['email_address'] not in sender:
             debug_log(f'rule={rule_name} | skipped: email_address filter "{c["email_address"]}" not in "{sender}"')
+            diagnostics.append(f'rule={rule_name} | email_address filter "{c["email_address"]}" not in "{sender}"')
             continue
         if c.get('email_theme') and not c['email_theme'].search(subj or ''):
             debug_log(f'rule={rule_name} | skipped: email_theme {c["email_theme"].pattern!r} does not match subject="{subj}"')
+            diagnostics.append(f'rule={rule_name} | email_theme {c["email_theme"].pattern!r} did not match subject')
             continue
 
         local_txt = c['strip_pattern'].sub('', text) if c.get('strip_pattern') else text
@@ -177,6 +180,8 @@ def extract(text, sender, subj, cfgs, msg_date=''):
             if len(snippet) > 400:
                 snippet = snippet[:400] + '…'
             debug_log(f'rule={rule_name} | no match preview: {snippet.replace(chr(10), "\\n")}')
+            clean_snippet = snippet.replace('\r', '').replace('\n', '\\n')
+            diagnostics.append(f'rule={rule_name} | regex produced no matches | snippet="{clean_snippet}"')
             continue
 
         for idx, m in enumerate(matches, 1):
@@ -195,6 +200,7 @@ def extract(text, sender, subj, cfgs, msg_date=''):
             generates_rest = 'rest' in c.get('field_map', {})
             if not rest and not generates_rest:
                 debug_log(f'rule={rule_name} | match {idx}: empty rest and no generator, skipping')
+                diagnostics.append(f'rule={rule_name} | match {idx}: empty rest after processing and no generator')
                 continue
 
             g['rest'] = rest
@@ -209,15 +215,17 @@ def extract(text, sender, subj, cfgs, msg_date=''):
                     loc[k] = eval(expr, {}, loc)
                 except Exception:
                     debug_log(f'rule={rule_name} | match {idx}: field_map key={k} failed for expr={expr!r}')
+                    diagnostics.append(f'rule={rule_name} | match {idx}: field_map key={k} failed for expr={expr!r}')
                     loc[k] = ''
             if isinstance(loc.get('rest'), str):
                 loc['rest'] = loc['rest'].strip()
             if not loc.get('rest'):
                 debug_log(f'rule={rule_name} | match {idx}: rest empty after processing, skipping')
+                diagnostics.append(f'rule={rule_name} | match {idx}: rest empty after processing, skipping')
                 continue
             debug_log(f'rule={rule_name} | match {idx}: fields keys={sorted(loc.keys())}')
             out.append({**c, **loc})
-    return out
+    return out, diagnostics
 
 # ─────────── aggregation ───────────
 def aggregate_logs(logs):
@@ -257,6 +265,24 @@ def log_decision(uid, frm, subj, cfg, sent, why=''):
     level = logging.INFO if sent else logging.WARNING
     logger.log(level, f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}"{reason}')
 
+def log_skip_report(uid, frm, subj, body_text, diagnostics, msg_ts=''):
+    preview = (body_text or '').replace('\r', '')
+    preview = preview.strip()
+    limit = 1200
+    truncated = False
+    if len(preview) > limit:
+        preview = preview[:limit]
+        truncated = True
+    if truncated:
+        preview += '…'
+    diag_lines = diagnostics or ['no rule reported additional diagnostics']
+    diag_text = '\n'.join(f'  - {line}' for line in diag_lines)
+    ts_part = f' | date={msg_ts}' if msg_ts else ''
+    logger.warning(
+        f'[EMAIL] UID={uid} | SKIP DETAIL{ts_part} | from="{frm}" | subj="{subj}"\n'
+        f'BODY PREVIEW:\n{preview}\nRULE CHECKS:\n{diag_text}'
+    )
+
 # ─────────── main mailbox loop ───────────
 def process_box(conn, done, cfgs):
     logger.info('Scanning mailbox for new emails')
@@ -284,9 +310,11 @@ def process_box(conn, done, cfgs):
             msg_ts = parse_email_ts(msg.get('Date'))
             txt = body(msg)
             debug_log(f'email UID={uid} | body preview: {txt[:400].replace(chr(10), "\\n")}')
-            logs = aggregate_logs(extract(txt, frm, subj, cfgs, msg_date=msg_ts))
+            matches, diag = extract(txt, frm, subj, cfgs, msg_date=msg_ts)
+            logs = aggregate_logs(matches)
             if not logs:
                 log_decision(uid, frm, subj, None, False, 'no matching rule')
+                log_skip_report(uid, frm, subj, txt, diag, msg_ts)
                 continue
             ok = True
             for lg in logs:
