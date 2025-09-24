@@ -90,7 +90,11 @@ def slack(msg):
     if normalised != raw_url:
         logger.debug('slack webhook url normalised (whitespace/quotes trimmed)')
 
-    details = _slack_target_details(normalised or raw_url)
+    if not normalised:
+        logger.warning('slack skipped: webhook url empty after normalisation')
+        return False
+
+    details = _slack_target_details(normalised)
     if details and logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             'slack target host=%s team=%s channel=%s token_len=%s message_chars=%s',
@@ -101,37 +105,13 @@ def slack(msg):
             len(msg or ''),
         )
     try:
-        _post_to_slack(raw_url, msg)
+        _post_to_slack(normalised, msg)
         return True
     except requests.exceptions.HTTPError as exc:
         _log_http_error(exc)
-        if exc.response is not None and exc.response.status_code == 404 and normalised and normalised != raw_url:
-            logger.warning('slack send failed, retrying with normalised URL')
-            try:
-                _post_to_slack(normalised, msg)
-                logger.info('slack delivered using normalised URL')
-                return True
-            except requests.exceptions.HTTPError as retry_exc:
-                _log_http_error(retry_exc)
-                return False
-            except requests.exceptions.RequestException:
-                logger.exception('slack err request-exception on retry')
-                return False
-            except Exception:
-                logger.exception('slack err unexpected on retry')
-                return False
         return False
     except requests.exceptions.RequestException:
         logger.exception('slack err request-exception')
-        if normalised and normalised != raw_url:
-            try:
-                _post_to_slack(normalised, msg)
-                logger.info('slack delivered using normalised URL after request exception')
-                return True
-            except requests.exceptions.HTTPError as retry_exc:
-                _log_http_error(retry_exc)
-            except Exception:
-                logger.exception('slack err unexpected on request-exception retry')
         return False
     except Exception:
         logger.exception('slack err unexpected')
