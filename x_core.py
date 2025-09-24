@@ -35,7 +35,6 @@ def load_env():
         'IMAP_PASS'  : os.getenv('IMAP_PASS'),
         'SLACK_URL'  : os.getenv('SLACK_URL'),
         'CHECK_SEC'  : int(os.getenv('CHECK_SEC', '10')),
-        'DEBUG_EMAIL': os.getenv('DEBUG_EMAIL', '0') == '1',
     }
 
 ENV = load_env()
@@ -91,9 +90,12 @@ def parse_email_ts(value):
         return ''
     try:
         dt = parsedate_to_datetime(value)
+        if dt is None:
+            return ''
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone().replace(microsecond=0).isoformat(sep=' ')
+        dt = dt.replace(microsecond=0)
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
         return ''
 
@@ -155,14 +157,11 @@ def extract(text, sender, subj, cfgs, msg_date=''):
     diagnostics = []
     for c in cfgs:
         rule_name = c.get('name', '<unnamed>')
-        debug_log(f'rule={rule_name} | checking filters for sender="{sender}" subject="{subj}"')
 
         if c.get('email_address') and c['email_address'] not in sender:
-            debug_log(f'rule={rule_name} | skipped: email_address filter "{c["email_address"]}" not in "{sender}"')
             diagnostics.append(f'rule={rule_name} | email_address filter "{c["email_address"]}" not in "{sender}"')
             continue
         if c.get('email_theme') and not c['email_theme'].search(subj or ''):
-            debug_log(f'rule={rule_name} | skipped: email_theme {c["email_theme"].pattern!r} does not match subject="{subj}"')
             diagnostics.append(f'rule={rule_name} | email_theme {c["email_theme"].pattern!r} did not match subject')
             continue
 
@@ -186,6 +185,20 @@ def extract(text, sender, subj, cfgs, msg_date=''):
             diagnostics.append(f'rule={rule_name} | regex produced no matches | snippet="{clean_snippet}"')
             continue
 
+        status_hint = ''
+        status_match = re.search(r'^\s*(Active alerts|Resolved)', local_txt, re.I | re.M)
+        if status_match:
+            status_hint = status_match.group(1)
+
+        matches = list(c['pattern'].finditer(local_txt))
+        if not matches:
+            snippet = local_txt.strip()
+            if len(snippet) > 400:
+                snippet = snippet[:400] + '…'
+            clean_snippet = snippet.replace('\r', '').replace('\n', '\\n')
+            diagnostics.append(f'rule={rule_name} | regex produced no matches | snippet="{clean_snippet}"')
+            continue
+
         for idx, m in enumerate(matches, 1):
             g = m.groupdict()
             rest = g.get('rest', '')
@@ -201,7 +214,6 @@ def extract(text, sender, subj, cfgs, msg_date=''):
             rest = rest.strip()
             generates_rest = 'rest' in c.get('field_map', {})
             if not rest and not generates_rest:
-                debug_log(f'rule={rule_name} | match {idx}: empty rest and no generator, skipping')
                 diagnostics.append(f'rule={rule_name} | match {idx}: empty rest after processing and no generator')
                 continue
 
@@ -216,16 +228,13 @@ def extract(text, sender, subj, cfgs, msg_date=''):
                 try:
                     loc[k] = eval(expr, {}, loc)
                 except Exception:
-                    debug_log(f'rule={rule_name} | match {idx}: field_map key={k} failed for expr={expr!r}')
                     diagnostics.append(f'rule={rule_name} | match {idx}: field_map key={k} failed for expr={expr!r}')
                     loc[k] = ''
             if isinstance(loc.get('rest'), str):
                 loc['rest'] = loc['rest'].strip()
             if not loc.get('rest'):
-                debug_log(f'rule={rule_name} | match {idx}: rest empty after processing, skipping')
                 diagnostics.append(f'rule={rule_name} | match {idx}: rest empty after processing, skipping')
                 continue
-            debug_log(f'rule={rule_name} | match {idx}: fields keys={sorted(loc.keys())}')
             out.append({**c, **loc})
     return out, diagnostics
 
@@ -311,7 +320,6 @@ def process_box(conn, done, cfgs):
             subj = decode_header_value(msg.get('Subject', ''))
             msg_ts = parse_email_ts(msg.get('Date'))
             txt = body(msg)
-            debug_log(f'email UID={uid} | body preview: {txt[:400].replace(chr(10), "\\n")}')
             matches, diag = extract(txt, frm, subj, cfgs, msg_date=msg_ts)
             logs = aggregate_logs(matches)
             if not logs:
