@@ -2,6 +2,7 @@ import os, re, time, csv, json, pickle, logging, imaplib, email, requests
 from collections import defaultdict
 from datetime import timezone
 from email.utils import parsedate_to_datetime
+from email.header import decode_header, make_header
 from bs4 import BeautifulSoup
 import pathlib, dotenv
 
@@ -84,6 +85,26 @@ def parse_email_ts(value):
         return dt.astimezone().replace(microsecond=0).isoformat(sep=' ')
     except Exception:
         return ''
+
+def decode_header_value(value):
+    if not value:
+        return ''
+    try:
+        return str(make_header(decode_header(value)))
+    except Exception:
+        if isinstance(value, bytes):
+            for enc in ('utf-8', 'latin1'):
+                try:
+                    return value.decode(enc)
+                except Exception:
+                    continue
+            return value.decode(errors='ignore')
+        if isinstance(value, str):
+            try:
+                return value.encode('latin1').decode('utf-8')
+            except Exception:
+                return value
+        return str(value)
 
 def parse_config(p):
     with open(p, 'r', encoding='utf-8') as f:
@@ -207,8 +228,8 @@ def process_box(conn, done, cfgs):
             if st != 'OK':
                 continue
             msg = email.message_from_bytes(md[0][1])
-            frm = msg.get('From', '')
-            subj = msg.get('Subject', '')
+            frm = decode_header_value(msg.get('From', ''))
+            subj = decode_header_value(msg.get('Subject', ''))
             msg_ts = parse_email_ts(msg.get('Date'))
             txt = body(msg)
             logs = aggregate_logs(extract(txt, frm, subj, cfgs, msg_date=msg_ts))
