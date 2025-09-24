@@ -124,15 +124,27 @@ def parse_config(p):
         cfgs = []
         for r in reader:
             try:
-                r['pattern']          = re.compile(r['pattern'], re.S)
-                r['field_map']        = json.loads(r['field_map'] or '{}')
-                r['exclude_fields']   = set((r.get('exclude_fields') or '').split(',')) - {''}
-                r['email_theme']      = re.compile(r['email_theme'])      if r.get('email_theme')      else None
-                r['strip_pattern']    = re.compile(r['strip_pattern'], re.S | re.I) if r.get('strip_pattern') else None
-                r['truncate_pattern'] = re.compile(r['truncate_pattern']) if r.get('truncate_pattern') else None
+                pattern_raw = (r.get('pattern') or '').strip()
+                if not pattern_raw:
+                    raise ValueError('empty pattern')
+                r['pattern'] = re.compile(pattern_raw, re.S)
+
+                r['field_map'] = json.loads((r.get('field_map') or '').strip() or '{}')
+
+                exclude_raw = r.get('exclude_fields') or ''
+                r['exclude_fields'] = {part.strip() for part in exclude_raw.split(',') if part.strip()}
+
+                theme_raw = (r.get('email_theme') or '').strip()
+                r['email_theme'] = re.compile(theme_raw) if theme_raw else None
+
+                strip_raw = (r.get('strip_pattern') or '').strip()
+                r['strip_pattern'] = re.compile(strip_raw, re.S | re.I) if strip_raw else None
+
+                trunc_raw = (r.get('truncate_pattern') or '').strip()
+                r['truncate_pattern'] = re.compile(trunc_raw) if trunc_raw else None
                 cfgs.append(r)
-            except Exception:
-                logger.warning(f'bad cfg row skipped: {r}')
+            except Exception as exc:
+                logger.warning(f'bad cfg row skipped: {r} | err={exc}')
         logger.info(f'Loaded {len(cfgs)} rules')
         return cfgs
 
