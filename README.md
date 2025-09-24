@@ -42,6 +42,7 @@ IMAP_PASS=SuperSecret
 SLACK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
 UID_OBJECT_KEY=xcore_uid.pkl
 CHECK_SEC=10
+DEBUG_EMAIL=0
 ```
 - `CHECK_SEC` — пауза между опросами почтового ящика (секунды).
 

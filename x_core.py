@@ -16,6 +16,15 @@ logging.basicConfig(filename=LOG_PATH, level=logging.INFO, encoding='utf-8',
                     format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger()
 
+# ─────────── logging helpers ───────────
+def debug_log(message):
+    """Emit debug messages only when DEBUG_EMAIL=1."""
+    try:
+        if ENV.get('DEBUG_EMAIL'):
+            logger.debug(message)
+    except Exception:
+        logger.debug(message)
+
 # ─────────── .env hot-load ───────────
 def load_env():
     if ENV_PATH.exists():
@@ -157,6 +166,8 @@ def extract(text, sender, subj, cfgs, msg_date=''):
             continue
 
         local_txt = c['strip_pattern'].sub('', text) if c.get('strip_pattern') else text
+        if c.get('strip_pattern') and ENV.get('DEBUG_EMAIL'):
+            debug_log(f'rule={rule_name} | strip_pattern removed tail: len(text) {len(text)} -> {len(local_txt)}')
 
         status_hint = ''
         status_match = re.search(r'^\s*(Active alerts|Resolved)', local_txt, re.I | re.M)
@@ -225,6 +236,7 @@ def aggregate_logs(logs):
             base = grp[0].copy()
             base['rest'] = "\n".join(x['rest'] for x in grp)
             res.append(base)
+    debug_log(f'aggregate_logs | input={len(logs)} grouped={len(res)}')
     return res
 
 # ─────────── slack format ───────────
