@@ -134,7 +134,8 @@ def extract(text, sender, subj, cfgs, msg_date=''):
                     rest = rest[:cut.start()].rstrip()
 
             rest = rest.strip()
-            if not rest:
+            generates_rest = 'rest' in c.get('field_map', {})
+            if not rest and not generates_rest:
                 continue
 
             g['rest'] = rest
@@ -149,6 +150,10 @@ def extract(text, sender, subj, cfgs, msg_date=''):
                     loc[k] = eval(expr, {}, loc)
                 except Exception:
                     loc[k] = ''
+            if isinstance(loc.get('rest'), str):
+                loc['rest'] = loc['rest'].strip()
+            if not loc.get('rest'):
+                continue
             out.append({**c, **loc})
     return out
 
