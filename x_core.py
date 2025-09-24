@@ -68,7 +68,9 @@ def slack(msg):
         return False
 
 def html2text(html):
-    return BeautifulSoup(html, 'html.parser').get_text()
+    text = BeautifulSoup(html, 'html.parser').get_text(separator='\n')
+    text = text.replace('\xa0', ' ')
+    return re.sub(r'\n{2,}', '\n', text)
 
 def body(msg):
     if msg.is_multipart():
