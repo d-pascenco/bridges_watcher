@@ -1,8 +1,11 @@
 import os, re, time, csv, json, pickle, logging, imaplib, email, requests
+import argparse
+import sys
 from email.utils import parsedate_to_datetime
 from collections import defaultdict
 from bs4 import BeautifulSoup
 import pathlib, dotenv
+from urllib.parse import urlparse
 
 BASE        = pathlib.Path(__file__).resolve().parent
 CFG_PATH    = BASE / 'parser_config.csv'
@@ -47,6 +50,23 @@ def save_uids(u):
     except Exception:
         logger.exception('uid save')
 
+def _slack_target_details(url):
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    segments = [seg for seg in parsed.path.split('/') if seg]
+    team_id = segments[1] if len(segments) > 1 else ''
+    channel_id = segments[2] if len(segments) > 2 else ''
+    token_len = len(segments[3]) if len(segments) > 3 else 0
+    return {
+        'host': parsed.netloc,
+        'team': team_id,
+        'channel': channel_id,
+        'token_len': token_len,
+    }
+
+
 def slack(msg):
     raw_url = ENV.get('SLACK_URL') or ''
     url = raw_url.strip().strip('"').strip("'")
@@ -55,6 +75,16 @@ def slack(msg):
         return False
     if url != raw_url:
         logger.debug('slack webhook url normalised (whitespace trimmed)')
+    details = _slack_target_details(url)
+    if details and logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            'slack target host=%s team=%s channel=%s token_len=%s message_chars=%s',
+            details['host'] or 'unknown',
+            details['team'] or 'unknown',
+            details['channel'] or 'unknown',
+            details['token_len'],
+            len(msg or ''),
+        )
     try:
         r = requests.post(url, json={'text': msg}, timeout=10)
         r.raise_for_status()
@@ -259,7 +289,7 @@ def process_box(conn, done, cfgs):
             log_decision(uid, frm, subj, None, False, f'exc:{e}')
     return sent_total
 
-def main():
+def main(run_once=False):
     done = load_uids()
     cfgs = parse_config(CFG_PATH)
     cfg_mtime = os.path.getmtime(CFG_PATH)
@@ -290,10 +320,67 @@ def main():
         except Exception:
             logger.exception('imap loop')
 
+        if run_once:
+            break
+
         time.sleep(ENV['CHECK_SEC'])
 
-if __name__ == '__main__':
+def cli():
+    parser = argparse.ArgumentParser(description='Bridges Watcher mailbox processor')
+    parser.add_argument(
+        '--check-slack',
+        nargs='?',
+        const='Bridges Watcher Slack connectivity test',
+        metavar='MESSAGE',
+        help='Send a test message to the configured Slack webhook and exit.',
+    )
+    parser.add_argument(
+        '--slack-info',
+        action='store_true',
+        help='Print a sanitised summary of the Slack webhook target and exit.',
+    )
+    parser.add_argument(
+        '--run-once',
+        action='store_true',
+        help='Process the mailbox a single time instead of running endlessly.',
+    )
+    args = parser.parse_args()
+
+    if args.slack_info:
+        info = _slack_target_details(ENV.get('SLACK_URL') or '')
+        if info:
+            summary = (
+                f"Slack webhook host={info['host'] or 'unknown'} "
+                f"team={info['team'] or 'unknown'} "
+                f"channel={info['channel'] or 'unknown'} "
+                f"token_len={info['token_len']}"
+            )
+        else:
+            summary = 'Slack webhook summary unavailable (missing or invalid URL).'
+        print(summary)
+        logger.info(summary)
+        if args.check_slack is None and not args.run_once:
+            return
+
+    if args.check_slack is not None:
+        message = args.check_slack or 'Bridges Watcher Slack connectivity test'
+        print(f'Sending Slack test message: {message!r}')
+        ok = slack(message)
+        if ok:
+            print('Slack test message delivered successfully.')
+            logger.info('Slack test message delivered successfully.')
+        else:
+            print('Slack test message failed. Inspect xcore.log for details.')
+            logger.error('Slack test message failed.')
+            sys.exit(1)
+        if not args.run_once:
+            return
+
     try:
-        main()
+        main(run_once=args.run_once)
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == '__main__':
+    cli()
