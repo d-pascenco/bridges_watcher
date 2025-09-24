@@ -209,23 +209,32 @@ def make_slack(l):
     return '> ' + '\n> '.join(msg.strip().splitlines())
 
 def log_decision(uid, frm, subj, cfg, sent, why=''):
-    if not ENV['DEBUG_EMAIL']:
-        return
     status = 'SENT' if sent else 'SKIPPED'
     rule = cfg or 'no-match'
-    logger.debug(f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}" | {why}')
+    reason = f' | reason={why}' if why else ''
+    level = logging.INFO if sent else logging.WARNING
+    logger.log(level, f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}"{reason}')
 
 # ─────────── main mailbox loop ───────────
 def process_box(conn, done, cfgs):
+    logger.info('Scanning mailbox for new emails')
     st, data = conn.uid('search', None, 'ALL')
     if st != 'OK':
+        logger.error(f'IMAP search failed with status: {st}')
         return 0
-    new = [u.decode() for u in data[0].split() if u.decode() not in done]
+    all_uids = [u.decode() for u in data[0].split()]
+    new = [u for u in all_uids if u not in done]
+    logger.info(f'Found {len(new)} new email(s) (total in mailbox: {len(all_uids)})')
+    processed_total = 0
     sent_total = 0
     for uid in new:
+        frm = subj = ''
         try:
+            processed_total += 1
+            logger.info(f'Fetching email UID={uid}')
             st, md = conn.uid('fetch', uid, '(RFC822)')
             if st != 'OK':
+                log_decision(uid, frm, subj, None, False, f'fetch status {st}')
                 continue
             msg = email.message_from_bytes(md[0][1])
             frm = decode_header_value(msg.get('From', ''))
@@ -234,19 +243,22 @@ def process_box(conn, done, cfgs):
             txt = body(msg)
             logs = aggregate_logs(extract(txt, frm, subj, cfgs, msg_date=msg_ts))
             if not logs:
-                log_decision(uid, frm, subj, None, False, 'no rule')
+                log_decision(uid, frm, subj, None, False, 'no matching rule')
                 continue
             ok = True
             for lg in logs:
                 res = slack(make_slack(lg))
                 ok &= res
-                log_decision(uid, frm, subj, lg.get('name'), res, '' if res else 'Slack err')
+                reason = 'delivered to Slack' if res else 'Slack err'
+                log_decision(uid, frm, subj, lg.get('name'), res, reason)
             if ok:
                 done.add(uid)
                 sent_total += 1
         except Exception as e:
             logger.exception(f'uid {uid}')
             log_decision(uid, frm, subj, None, False, f'exc:{e}')
+    skipped = max(processed_total - sent_total, 0)
+    logger.info(f'Cycle summary: processed={processed_total}, sent={sent_total}, skipped={skipped}')
     return sent_total
 
 def main():
