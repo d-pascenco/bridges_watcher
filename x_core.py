@@ -73,6 +73,8 @@ def load_env():
     imap_user = resolve('IMAP_USER')
     imap_pass = resolve('IMAP_PASS')
     slack_url = resolve('SLACK_URL')
+    slack_bot_token = resolve('SLACK_BOT_TOKEN')
+    slack_channel = resolve('SLACK_CHANNEL')
 
     raw_check_sec = resolve('CHECK_SEC', '10')
     try:
@@ -89,6 +91,8 @@ def load_env():
         'IMAP_USER'  : imap_user,
         'IMAP_PASS'  : imap_pass,
         'SLACK_URL'  : slack_url,
+        'SLACK_BOT_TOKEN': slack_bot_token,
+        'SLACK_CHANNEL'  : slack_channel,
         'CHECK_SEC'  : check_sec,
         'DEBUG_EMAIL': debug_email,
     }
@@ -97,6 +101,11 @@ def load_env():
         logger.info('SLACK_URL loaded from process environment (no override in .env)')
     elif meta.get('SLACK_URL') == 'missing':
         logger.warning('SLACK_URL not configured in environment or .env')
+
+    if env.get('SLACK_BOT_TOKEN') and not env.get('SLACK_CHANNEL'):
+        logger.warning('SLACK_BOT_TOKEN configured but SLACK_CHANNEL missing')
+    if env.get('SLACK_CHANNEL') and not env.get('SLACK_BOT_TOKEN'):
+        logger.warning('SLACK_CHANNEL configured but SLACK_BOT_TOKEN missing')
 
     globals()['ENV_META'] = meta
     return env
@@ -228,10 +237,10 @@ def _post_to_slack(url, msg):
     r.raise_for_status()
 
 
-def _slack_url_fingerprint(url):
-    if not url:
+def _fingerprint_value(value):
+    if not value:
         return 'missing'
-    digest = hashlib.sha256(url.encode('utf-8')).hexdigest()
+    digest = hashlib.sha256(value.encode('utf-8')).hexdigest()
     return digest[:16]
 
 
@@ -246,12 +255,10 @@ def _log_http_error(exc, fingerprint=None):
         logger.error('slack err status=%s payload=%s', status, payload)
 
 
-def slack(msg):
-    raw_url = ENV.get('SLACK_URL') or ''
+def _send_via_slack_webhook(raw_url, msg):
     source = ENV_META.get('SLACK_URL', 'unknown')
     if not raw_url:
-        logger.warning('slack skipped: no webhook url configured')
-        return False
+        return False, False
 
     normalised, removed_chars = _normalise_slack_url(raw_url)
     if normalised != raw_url:
@@ -261,20 +268,20 @@ def slack(msg):
 
     if not normalised:
         logger.warning('slack skipped: webhook url empty after normalisation')
-        return False
+        return False, True
 
     ok, reason = _validate_slack_url(normalised)
     if not ok:
         logger.warning('slack skipped: %s', reason)
-        return False
+        return False, True
 
     try:
         normalised.encode('ascii')
     except UnicodeEncodeError:
         logger.warning('slack skipped: webhook url still contains non-ASCII characters after sanitisation')
-        return False
+        return False, True
 
-    fingerprint = _slack_url_fingerprint(normalised)
+    fingerprint = _fingerprint_value(normalised)
 
     details = _slack_target_details(normalised)
     if details and logger.isEnabledFor(logging.DEBUG):
@@ -288,21 +295,92 @@ def slack(msg):
         )
         logger.debug('slack webhook fingerprint=%s url_len=%s source=%s', fingerprint, len(normalised), source)
         if raw_url != normalised:
-            logger.debug('slack raw webhook fingerprint=%s raw_len=%s (pre-normalisation)', _slack_url_fingerprint(raw_url), len(raw_url))
+            logger.debug('slack raw webhook fingerprint=%s raw_len=%s (pre-normalisation)', _fingerprint_value(raw_url), len(raw_url))
         if source == 'env':
             logger.debug('slack webhook currently sourced from process environment')
     try:
         _post_to_slack(normalised, msg)
-        return True
+        return True, True
     except requests.exceptions.HTTPError as exc:
         _log_http_error(exc, fingerprint=fingerprint)
-        return False
+        return False, True
     except requests.exceptions.RequestException:
         logger.exception('slack err request-exception')
-        return False
+        return False, True
     except Exception:
         logger.exception('slack err unexpected')
+        return False, True
+
+
+def _post_via_slack_api(token, channel, msg):
+    if not token or not channel:
+        logger.warning('slack api skipped: bot token or channel missing')
         return False
+
+    token_fp = _fingerprint_value(token)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            'slack api target channel=%s token_fp=%s message_chars=%s',
+            channel,
+            token_fp,
+            len(msg or ''),
+        )
+
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json; charset=utf-8',
+    }
+    payload = {
+        'channel': channel,
+        'text': msg,
+    }
+    try:
+        resp = requests.post('https://slack.com/api/chat.postMessage', headers=headers, json=payload, timeout=10)
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError as exc:
+        status = getattr(exc.response, 'status_code', 'no-status')
+        body = ''
+        if exc.response is not None:
+            body = (exc.response.text or '').strip()
+        logger.error('slack api err status=%s payload=%s token_fp=%s', status, body, token_fp)
+        return False
+    except requests.exceptions.RequestException:
+        logger.exception('slack api err request-exception')
+        return False
+
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.error('slack api err non-json response payload=%s', (resp.text or '').strip())
+        return False
+
+    if not data.get('ok'):
+        logger.error('slack api err ok=%s error=%s', data.get('ok'), data.get('error'))
+        return False
+
+    return True
+
+
+def slack(msg):
+    webhook_url = ENV.get('SLACK_URL') or ''
+    bot_token = ENV.get('SLACK_BOT_TOKEN') or ''
+    channel = ENV.get('SLACK_CHANNEL') or ''
+
+    webhook_sent, webhook_attempted = _send_via_slack_webhook(webhook_url, msg)
+    if webhook_sent:
+        return True
+
+    if bot_token and channel:
+        if webhook_attempted:
+            logger.info('slack webhook delivery failed, trying chat.postMessage fallback')
+        else:
+            logger.info('slack webhook not configured, using chat.postMessage fallback')
+        return _post_via_slack_api(bot_token, channel, msg)
+
+    if not webhook_attempted:
+        logger.warning('slack skipped: no webhook url configured and no bot token/channel fallback available')
+
+    return False
 
 def html2text(html):
     return BeautifulSoup(html, 'html.parser').get_text()
@@ -549,14 +627,14 @@ def cli():
     args = parser.parse_args()
 
     if args.slack_info:
-        cleaned_url, removed_chars = _normalise_slack_url(ENV.get('SLACK_URL') or '')
+        raw_url = ENV.get('SLACK_URL') or ''
+        cleaned_url, removed_chars = _normalise_slack_url(raw_url)
         if removed_chars:
             logger.debug('slack webhook sanitised removed_chars=%s', _describe_hidden_chars(removed_chars))
         info = _slack_target_details(cleaned_url)
         if info:
-            fingerprint = _slack_url_fingerprint(cleaned_url)
+            fingerprint = _fingerprint_value(cleaned_url)
             source = ENV_META.get('SLACK_URL', 'unknown')
-            raw_url = ENV.get('SLACK_URL') or ''
             summary = (
                 f"Slack webhook host={info['host'] or 'unknown'} "
                 f"team={info['team'] or 'unknown'} "
@@ -568,13 +646,24 @@ def cli():
             )
             if raw_url and raw_url != cleaned_url:
                 summary += (
-                    f" raw_fingerprint={_slack_url_fingerprint(raw_url)} "
+                    f" raw_fingerprint={_fingerprint_value(raw_url)} "
                     f"raw_len={len(raw_url)}"
                 )
         else:
             summary = 'Slack webhook summary unavailable (missing or invalid URL).'
         print(summary)
         logger.info(summary)
+
+        bot_token = ENV.get('SLACK_BOT_TOKEN') or ''
+        channel = ENV.get('SLACK_CHANNEL') or ''
+        if bot_token or channel:
+            fallback_summary = (
+                f"Slack API fallback channel={channel or 'missing'} "
+                f"token_fp={_fingerprint_value(bot_token)}"
+            )
+            print(fallback_summary)
+            logger.info(fallback_summary)
+
         if args.check_slack is None and not args.run_once:
             return
 
