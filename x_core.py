@@ -174,11 +174,6 @@ def extract(text, sender, subj, cfgs, msg_date=''):
         if status_match:
             status_hint = status_match.group(1)
 
-        status_hint = ''
-        status_match = re.search(r'^\s*(Active alerts|Resolved)', local_txt, re.I | re.M)
-        if status_match:
-            status_hint = status_match.group(1)
-
         matches = list(c['pattern'].finditer(local_txt))
         if not matches:
             snippet = local_txt.strip()
@@ -262,8 +257,10 @@ def log_decision(uid, frm, subj, cfg, sent, why=''):
     status = 'SENT' if sent else 'SKIPPED'
     rule = cfg or 'no-match'
     reason = f' | reason={why}' if why else ''
-    level = logging.INFO if sent else logging.WARNING
-    logger.log(level, f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}"{reason}')
+    if sent:
+        logger.debug(f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}"{reason}')
+    else:
+        logger.warning(f'[EMAIL] UID={uid} | {status} | rule={rule} | from="{frm}" | subj="{subj}"{reason}')
 
 def log_skip_report(uid, frm, subj, body_text, diagnostics, msg_ts=''):
     preview = (body_text or '').replace('\r', '')
@@ -285,21 +282,24 @@ def log_skip_report(uid, frm, subj, body_text, diagnostics, msg_ts=''):
 
 # ─────────── main mailbox loop ───────────
 def process_box(conn, done, cfgs):
-    logger.info('Scanning mailbox for new emails')
+    logger.debug('Scanning mailbox for new emails')
     st, data = conn.uid('search', None, 'ALL')
     if st != 'OK':
         logger.error(f'IMAP search failed with status: {st}')
         return 0
     all_uids = [u.decode() for u in data[0].split()]
     new = [u for u in all_uids if u not in done]
-    logger.info(f'Found {len(new)} new email(s) (total in mailbox: {len(all_uids)})')
+    if new:
+        logger.info(f'Found {len(new)} new email(s) (total in mailbox: {len(all_uids)})')
+    else:
+        logger.debug(f'No new emails (total in mailbox: {len(all_uids)})')
     processed_total = 0
     sent_total = 0
     for uid in new:
         frm = subj = ''
         try:
             processed_total += 1
-            logger.info(f'Fetching email UID={uid}')
+            logger.debug(f'Fetching email UID={uid}')
             st, md = conn.uid('fetch', uid, '(RFC822)')
             if st != 'OK':
                 log_decision(uid, frm, subj, None, False, f'fetch status {st}')
