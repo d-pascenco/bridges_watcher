@@ -12,7 +12,7 @@ ENV_PATH    = BASE / '.env'
 UID_PATH    = BASE / 'xcore_uid.pkl'
 LOG_PATH    = BASE / 'xcore.log'
 
-logging.basicConfig(filename=LOG_PATH, level=logging.DEBUG, encoding='utf-8',
+logging.basicConfig(filename=LOG_PATH, level=logging.INFO, encoding='utf-8',
                     format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger()
 
@@ -173,17 +173,6 @@ def extract(text, sender, subj, cfgs, msg_date=''):
         status_match = re.search(r'^\s*(Active alerts|Resolved)', local_txt, re.I | re.M)
         if status_match:
             status_hint = status_match.group(1)
-
-        matches = list(c['pattern'].finditer(local_txt))
-        debug_log(f'rule={rule_name} | regex matches found: {len(matches)}')
-        if not matches:
-            snippet = local_txt.strip()
-            if len(snippet) > 400:
-                snippet = snippet[:400] + '…'
-            debug_log(f'rule={rule_name} | no match preview: {snippet.replace(chr(10), "\\n")}')
-            clean_snippet = snippet.replace('\r', '').replace('\n', '\\n')
-            diagnostics.append(f'rule={rule_name} | regex produced no matches | snippet="{clean_snippet}"')
-            continue
 
         status_hint = ''
         status_match = re.search(r'^\s*(Active alerts|Resolved)', local_txt, re.I | re.M)
