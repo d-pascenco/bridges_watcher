@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 import pathlib, dotenv
 from urllib.parse import urlparse
 import unicodedata
+import hashlib
 
 BASE        = pathlib.Path(__file__).resolve().parent
 CFG_PATH    = BASE / 'parser_config.csv'
@@ -86,6 +87,20 @@ def _describe_hidden_chars(chars):
     return ', '.join(parts)
 
 
+def _describe_visible_chars(chars):
+    if not chars:
+        return ''
+    seen = []
+    for ch in chars:
+        code = f'U+{ord(ch):04X}'
+        try:
+            name = unicodedata.name(ch)
+        except ValueError:
+            name = 'UNKNOWN'
+        seen.append(f"{ch!r} ({code} {name})")
+    return ', '.join(seen)
+
+
 def _normalise_slack_url(raw_url):
     if not raw_url:
         return '', []
@@ -103,17 +118,62 @@ def _normalise_slack_url(raw_url):
     return cleaned, removed_chars
 
 
+_SLACK_ID_RE = re.compile(r'^[A-Za-z0-9_-]+$')
+
+
+def _validate_slack_url(url):
+    if not url:
+        return False, 'webhook url empty'
+
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:
+        return False, f'cannot parse webhook url ({exc})'
+
+    if parsed.scheme != 'https':
+        return False, f'unexpected scheme {parsed.scheme!r}'
+    if parsed.netloc != 'hooks.slack.com':
+        return False, f'unexpected host {parsed.netloc!r}'
+
+    segments = [seg for seg in parsed.path.split('/') if seg]
+    if len(segments) != 4 or segments[0] != 'services':
+        return False, 'unexpected path format'
+
+    team_id, channel_id, token = segments[1:4]
+    unexpected = []
+    for label, value in (('team', team_id), ('channel', channel_id), ('token', token)):
+        if not value:
+            return False, f'missing {label} segment'
+        if not _SLACK_ID_RE.fullmatch(value):
+            unexpected.extend([(label, ch) for ch in value if ch not in '-_' and not ch.isalnum()])
+    if unexpected:
+        bad_desc = _describe_visible_chars([ch for _, ch in unexpected])
+        return False, f'unexpected characters in segments: {bad_desc}'
+
+    return True, ''
+
+
 def _post_to_slack(url, msg):
     r = requests.post(url, json={'text': msg}, timeout=10)
     r.raise_for_status()
 
 
-def _log_http_error(exc):
+def _slack_url_fingerprint(url):
+    if not url:
+        return 'missing'
+    digest = hashlib.sha256(url.encode('utf-8')).hexdigest()
+    return digest[:16]
+
+
+def _log_http_error(exc, fingerprint=None):
     payload = ''
     status = getattr(exc.response, 'status_code', 'no-status')
     if exc.response is not None:
         payload = (exc.response.text or '').strip()
-    logger.error('slack err status=%s payload=%s', status, payload)
+    if fingerprint:
+        logger.error('slack err status=%s payload=%s fingerprint=%s', status, payload, fingerprint)
+    else:
+        logger.error('slack err status=%s payload=%s', status, payload)
 
 
 def slack(msg):
@@ -132,11 +192,18 @@ def slack(msg):
         logger.warning('slack skipped: webhook url empty after normalisation')
         return False
 
+    ok, reason = _validate_slack_url(normalised)
+    if not ok:
+        logger.warning('slack skipped: %s', reason)
+        return False
+
     try:
         normalised.encode('ascii')
     except UnicodeEncodeError:
         logger.warning('slack skipped: webhook url still contains non-ASCII characters after sanitisation')
         return False
+
+    fingerprint = _slack_url_fingerprint(normalised)
 
     details = _slack_target_details(normalised)
     if details and logger.isEnabledFor(logging.DEBUG):
@@ -148,11 +215,12 @@ def slack(msg):
             details['token_len'],
             len(msg or ''),
         )
+        logger.debug('slack webhook fingerprint=%s url_len=%s', fingerprint, len(normalised))
     try:
         _post_to_slack(normalised, msg)
         return True
     except requests.exceptions.HTTPError as exc:
-        _log_http_error(exc)
+        _log_http_error(exc, fingerprint=fingerprint)
         return False
     except requests.exceptions.RequestException:
         logger.exception('slack err request-exception')
@@ -411,11 +479,14 @@ def cli():
             logger.debug('slack webhook sanitised removed_chars=%s', _describe_hidden_chars(removed_chars))
         info = _slack_target_details(cleaned_url)
         if info:
+            fingerprint = _slack_url_fingerprint(cleaned_url)
             summary = (
                 f"Slack webhook host={info['host'] or 'unknown'} "
                 f"team={info['team'] or 'unknown'} "
                 f"channel={info['channel'] or 'unknown'} "
-                f"token_len={info['token_len']}"
+                f"token_len={info['token_len']} "
+                f"fingerprint={fingerprint} "
+                f"url_len={len(cleaned_url)}"
             )
         else:
             summary = 'Slack webhook summary unavailable (missing or invalid URL).'
