@@ -1,5 +1,8 @@
 import os, re, time, csv, json, pickle, logging, imaplib, email, requests
 from collections import defaultdict
+from datetime import timezone
+from email.utils import parsedate_to_datetime
+from email.header import decode_header, make_header
 from bs4 import BeautifulSoup
 import pathlib, dotenv
 
@@ -72,6 +75,37 @@ def body(msg):
     t = raw.decode(errors='replace')
     return t if msg.get_content_type() == 'text/plain' else html2text(t)
 
+def parse_email_ts(value):
+    if not value:
+        return ''
+    try:
+        dt = parsedate_to_datetime(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().replace(microsecond=0).isoformat(sep=' ')
+    except Exception:
+        return ''
+
+def decode_header_value(value):
+    if not value:
+        return ''
+    try:
+        return str(make_header(decode_header(value)))
+    except Exception:
+        if isinstance(value, bytes):
+            for enc in ('utf-8', 'latin1'):
+                try:
+                    return value.decode(enc)
+                except Exception:
+                    continue
+            return value.decode(errors='ignore')
+        if isinstance(value, str):
+            try:
+                return value.encode('latin1').decode('utf-8')
+            except Exception:
+                return value
+        return str(value)
+
 def parse_config(p):
     with open(p, 'r', encoding='utf-8') as f:
         sample = f.read(4096)
@@ -93,7 +127,7 @@ def parse_config(p):
         logger.info(f'Loaded {len(cfgs)} rules')
         return cfgs
 
-def extract(text, sender, subj, cfgs):
+def extract(text, sender, subj, cfgs, msg_date=''):
     out = []
     for c in cfgs:
         if c.get('email_address') and c['email_address'] not in sender:
@@ -102,6 +136,11 @@ def extract(text, sender, subj, cfgs):
             continue
 
         local_txt = c['strip_pattern'].sub('', text) if c.get('strip_pattern') else text
+
+        status_hint = ''
+        status_match = re.search(r'^\s*(Active alerts|Resolved)', local_txt, re.I | re.M)
+        if status_match:
+            status_hint = status_match.group(1)
 
         for m in c['pattern'].finditer(local_txt):
             g = m.groupdict()
@@ -116,16 +155,26 @@ def extract(text, sender, subj, cfgs):
                     rest = rest[:cut.start()].rstrip()
 
             rest = rest.strip()
-            if not rest:
+            generates_rest = 'rest' in c.get('field_map', {})
+            if not rest and not generates_rest:
                 continue
 
             g['rest'] = rest
             loc = g.copy()
+            loc.setdefault('email_ts', msg_date or '')
+            loc.setdefault('email_subject', subj or '')
+            loc.setdefault('email_from', sender or '')
+            loc.setdefault('status_hint', status_hint)
+            loc.setdefault('status_value', (g.get('status') or status_hint or '').strip())
             for k, expr in c['field_map'].items():
                 try:
                     loc[k] = eval(expr, {}, loc)
                 except Exception:
                     loc[k] = ''
+            if isinstance(loc.get('rest'), str):
+                loc['rest'] = loc['rest'].strip()
+            if not loc.get('rest'):
+                continue
             out.append({**c, **loc})
     return out
 
@@ -133,7 +182,8 @@ def extract(text, sender, subj, cfgs):
 def aggregate_logs(logs):
     groups = defaultdict(list)
     for l in logs:
-        groups[l['name']].append(l)
+        key = (l.get('name'), l.get('lvl'), l.get('stat'))
+        groups[key].append(l)
     res = []
     for grp in groups.values():
         if len(grp) == 1:
@@ -178,10 +228,11 @@ def process_box(conn, done, cfgs):
             if st != 'OK':
                 continue
             msg = email.message_from_bytes(md[0][1])
-            frm = msg.get('From', '')
-            subj = msg.get('Subject', '')
+            frm = decode_header_value(msg.get('From', ''))
+            subj = decode_header_value(msg.get('Subject', ''))
+            msg_ts = parse_email_ts(msg.get('Date'))
             txt = body(msg)
-            logs = aggregate_logs(extract(txt, frm, subj, cfgs))
+            logs = aggregate_logs(extract(txt, frm, subj, cfgs, msg_date=msg_ts))
             if not logs:
                 log_decision(uid, frm, subj, None, False, 'no rule')
                 continue
