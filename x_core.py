@@ -399,38 +399,11 @@ def body(msg):
     t = raw.decode(errors='replace')
     return t if msg.get_content_type() == 'text/plain' else html2text(t)
 
-def kv_blocks(text, start_key='message', keys=None):
-    keys = keys or ('message', 'consumer', 'grafana_folder', 'instance', 'priority')
-    blocks = []
-    current = {}
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or ':' not in stripped:
-            continue
-        key, value = stripped.split(':', 1)
-        key_norm = key.strip().lower()
-        if key_norm == start_key and current:
-            blocks.append(current)
-            current = {}
-        if key_norm in keys:
-            current[key_norm] = value.strip()
-    if current:
-        blocks.append(current)
-    return blocks
-
-EVAL_GLOBALS = {
-    '__builtins__': __builtins__,
-    'kv_blocks': kv_blocks,
-}
-
 def parse_config(p):
     with open(p, 'r', encoding='utf-8') as f:
         sample = f.read(4096)
         f.seek(0)
         dialect = csv.Sniffer().sniff(sample, delimiters=',;\t')
-        if getattr(dialect, 'quotechar', '"') != '"':
-            dialect.quotechar = '"'
-            dialect.doublequote = True
         reader = csv.DictReader(f, dialect=dialect)
         cfgs = []
         for r in reader:
@@ -491,7 +464,7 @@ def extract(text, sender, subj, cfgs, email_ts=''):
             loc.setdefault('email_ts', email_ts)
             for k, expr in c['field_map'].items():
                 try:
-                    loc[k] = eval(expr, EVAL_GLOBALS, loc)
+                    loc[k] = eval(expr, {}, loc)
                 except Exception:
                     loc[k] = ''
             if email_ts and not loc.get('ts'):
