@@ -102,7 +102,7 @@ for /f "delims=" %%a in (.env) do set %%a
 - Используйте двойные кавычки внутри JSON: `"{""key"": ""value""}"`.
 - Если нужно многострочное регулярное выражение, добавьте inline-флаги (`(?isx)` и т.д.). Скрипт всё равно компилирует шаблон с `re.S`.
 - Для сложных сообщений удобно сначала убрать «хвосты» футеров через `strip_pattern`, а затем применять основной `pattern`.
-- При нескольких совпадениях для одного правила тексты объединяются через перевод строки и отправляются одним Slack-сообщением.
+- При нескольких совпадениях с одинаковыми `name`, уровнем (`LEVEL`) и статусом (`STATUS`) тексты объединяются и отправляются одним Slack-сообщением.
 
 ### Примеры правил
 **XCORE лог:**
@@ -114,10 +114,10 @@ xcore_log,"(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+\[(?P<lvl>[A-Z]+
 
 **TPT Hub (Grafana) оповещения:**
 ```
-tpt_hub_alert,"(?isx)(?:^|\n)(?:(?P<status>Active\ alerts|Resolved)\s*:?)?\s*message:\s*(?P<msg>.*?)(?=\nalertname:)\nalertname:\s*(?P<alertname>[^\n]*)\nconsumer:\s*(?P<consumer>[^\n]*)\ngrafana_folder:\s*(?P<grafana_folder>[^\n]*)\ninstance:\s*(?P<instance>[^\n]*)(?:.*?)(?=\npriority:)\npriority:\s*(?P<priority>\w+)(?:.*?)(?=\n(?:message:|Active\ alerts|Resolved)|\Z)","{""lvl"": ""(priority or '').strip().upper() + ' PRIORITY' if priority else ''"",""stat"": ""'ACTIVE ALERT' if ((status or status_hint or '').strip().lower().startswith('active')) else 'RESOLVED' if (status or status_hint) else 'STATUS UNKNOWN'"",""rest"": ""'\\n'.join([p for p in [msg.strip(), ('consumer: ' + consumer.strip()) if consumer.strip() else '', ('grafana_folder: ' + grafana_folder.strip()) if grafana_folder.strip() else '', ('instance: ' + instance.strip()) if instance.strip() else ''] if p])"",""ts"": ""email_ts""}","*CATEGORY:* TPT-HUB\n*TIMESTAMP:* {ts}\n*LEVEL:* {lvl}\n*STATUS:* {stat}\n*EVENT_TEXT:*\n```\n{rest}\n```",,,"(?i)^\[Alert\]\s*TPT Grafana","---[\s\S]*$",""
+tpt_hub_alert,"(?isx)(?:^|\n)(?:(?P<status>Active\ alerts|Resolved)\s*:?)?\s*message:\s*(?P<msg>.*?)(?=\nalertname:)\nalertname:\s*(?P<alertname>[^\n]*)\nconsumer:\s*(?P<consumer>[^\n]*)\ngrafana_folder:\s*(?P<grafana_folder>[^\n]*)\ninstance:\s*(?P<instance>[^\n]*)(?:.*?)(?=\npriority:)\npriority:\s*(?P<priority>\w+)(?:.*?)(?=\n(?:message:|Active\ alerts|Resolved)|\Z)","{""lvl"": ""(priority or '').strip().upper() + ' PRIORITY' if priority else ''"",""stat"": ""'ACTIVE ALERT' if ((status or status_hint or '').strip().lower().startswith('active')) else 'RESOLVED' if (status or status_hint) else 'STATUS UNKNOWN'"",""rest"": ""'\\n'.join([p for p in [msg.strip(), ('consumer: ' + consumer.strip()) if consumer.strip() else '', ('grafana_folder: ' + grafana_folder.strip()) if grafana_folder.strip() else '', ('instance: ' + instance.strip()) if instance.strip() else ''] if p])"",""ts"": ""email_ts""}","*CATEGORY:* TPT-HUB\n*TIMESTAMP:* {ts}\n*LEVEL:* {lvl}\n*STATUS:* {stat}\n*EVENT_TEXT:*\n```\n{rest}\n```",,,"(?i)^\[Alert\]\s*TPT Grafana","(?is)(?:Sent by Grafana|To unsubscribe)[\\s\\S]*$",""
 ```
 - `email_theme` ограничивает правило письмами с темой вида `[Alert] TPT Grafana: …`.
-- `strip_pattern` удаляет футер Grafana (`--- Sent by Grafana …`).
+- `strip_pattern` срезает служебный хвост Grafana (`Sent by Grafana…`, `To unsubscribe…`).
 - Регулярное выражение разбивает сообщение на блоки по `message / consumer / grafana_folder / instance / priority`.
 - `ts` заполняется автоматически из заголовка письма `Date`.
 - `LEVEL` формируется из `priority` (например, `high → HIGH PRIORITY`).

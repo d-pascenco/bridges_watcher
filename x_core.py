@@ -161,7 +161,8 @@ def extract(text, sender, subj, cfgs, msg_date=''):
 def aggregate_logs(logs):
     groups = defaultdict(list)
     for l in logs:
-        groups[l['name']].append(l)
+        key = (l.get('name'), l.get('lvl'), l.get('stat'))
+        groups[key].append(l)
     res = []
     for grp in groups.values():
         if len(grp) == 1:
