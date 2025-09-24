@@ -20,17 +20,87 @@ logging.basicConfig(filename=LOG_PATH, level=logging.DEBUG, encoding='utf-8',
 logger = logging.getLogger()
 
 # ─────────── .env hot-load ───────────
+ENV_META = {}
+
+
 def load_env():
+    existing_env = dict(os.environ)
+    file_values = {}
+    meta = {}
+
     if ENV_PATH.exists():
-        dotenv.load_dotenv(ENV_PATH)
-    return {
-        'IMAP_SERVER': os.getenv('IMAP_HOST'),
-        'IMAP_USER'  : os.getenv('IMAP_USER'),
-        'IMAP_PASS'  : os.getenv('IMAP_PASS'),
-        'SLACK_URL'  : os.getenv('SLACK_URL'),
-        'CHECK_SEC'  : int(os.getenv('CHECK_SEC', '10')),
-        'DEBUG_EMAIL': os.getenv('DEBUG_EMAIL', '0') == '1',
+        try:
+            raw_values = dotenv.dotenv_values(ENV_PATH)
+            file_values = {k: v for k, v in raw_values.items() if v is not None}
+        except Exception:
+            logger.exception('.env parse failed')
+            file_values = {}
+
+    def _fingerprint(value):
+        if not value:
+            return 'missing'
+        return hashlib.sha256(str(value).encode('utf-8')).hexdigest()[:16]
+
+    def resolve(key, default=None):
+        if key in file_values:
+            value = file_values[key]
+            previous = existing_env.get(key)
+            if previous is not None and previous != value:
+                if key == 'SLACK_URL':
+                    logger.debug(
+                        'env override: SLACK_URL replaced existing value (old_fingerprint=%s new_fingerprint=%s)',
+                        _fingerprint(previous),
+                        _fingerprint(value),
+                    )
+                else:
+                    logger.debug('env override: %s replaced existing value', key)
+            if value is not None:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+            meta[key] = '.env'
+            return value if value not in (None, '') else default
+
+        value = existing_env.get(key)
+        if value is not None:
+            meta[key] = 'env'
+            return value
+
+        meta[key] = 'missing'
+        return default
+
+    imap_server = resolve('IMAP_HOST')
+    imap_user = resolve('IMAP_USER')
+    imap_pass = resolve('IMAP_PASS')
+    slack_url = resolve('SLACK_URL')
+
+    raw_check_sec = resolve('CHECK_SEC', '10')
+    try:
+        check_sec = int(raw_check_sec)
+    except (TypeError, ValueError):
+        logger.warning('invalid CHECK_SEC=%r; defaulting to 10', raw_check_sec)
+        check_sec = 10
+
+    debug_email_flag = resolve('DEBUG_EMAIL', '0')
+    debug_email = str(debug_email_flag) == '1'
+
+    env = {
+        'IMAP_SERVER': imap_server,
+        'IMAP_USER'  : imap_user,
+        'IMAP_PASS'  : imap_pass,
+        'SLACK_URL'  : slack_url,
+        'CHECK_SEC'  : check_sec,
+        'DEBUG_EMAIL': debug_email,
     }
+
+    if meta.get('SLACK_URL') == 'env' and 'SLACK_URL' not in file_values:
+        logger.info('SLACK_URL loaded from process environment (no override in .env)')
+    elif meta.get('SLACK_URL') == 'missing':
+        logger.warning('SLACK_URL not configured in environment or .env')
+
+    globals()['ENV_META'] = meta
+    return env
+
 
 ENV = load_env()
 
@@ -178,6 +248,7 @@ def _log_http_error(exc, fingerprint=None):
 
 def slack(msg):
     raw_url = ENV.get('SLACK_URL') or ''
+    source = ENV_META.get('SLACK_URL', 'unknown')
     if not raw_url:
         logger.warning('slack skipped: no webhook url configured')
         return False
@@ -215,7 +286,11 @@ def slack(msg):
             details['token_len'],
             len(msg or ''),
         )
-        logger.debug('slack webhook fingerprint=%s url_len=%s', fingerprint, len(normalised))
+        logger.debug('slack webhook fingerprint=%s url_len=%s source=%s', fingerprint, len(normalised), source)
+        if raw_url != normalised:
+            logger.debug('slack raw webhook fingerprint=%s raw_len=%s (pre-normalisation)', _slack_url_fingerprint(raw_url), len(raw_url))
+        if source == 'env':
+            logger.debug('slack webhook currently sourced from process environment')
     try:
         _post_to_slack(normalised, msg)
         return True
@@ -480,14 +555,22 @@ def cli():
         info = _slack_target_details(cleaned_url)
         if info:
             fingerprint = _slack_url_fingerprint(cleaned_url)
+            source = ENV_META.get('SLACK_URL', 'unknown')
+            raw_url = ENV.get('SLACK_URL') or ''
             summary = (
                 f"Slack webhook host={info['host'] or 'unknown'} "
                 f"team={info['team'] or 'unknown'} "
                 f"channel={info['channel'] or 'unknown'} "
                 f"token_len={info['token_len']} "
                 f"fingerprint={fingerprint} "
-                f"url_len={len(cleaned_url)}"
+                f"url_len={len(cleaned_url)} "
+                f"source={source}"
             )
+            if raw_url and raw_url != cleaned_url:
+                summary += (
+                    f" raw_fingerprint={_slack_url_fingerprint(raw_url)} "
+                    f"raw_len={len(raw_url)}"
+                )
         else:
             summary = 'Slack webhook summary unavailable (missing or invalid URL).'
         print(summary)
