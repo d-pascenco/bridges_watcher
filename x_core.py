@@ -67,14 +67,28 @@ def _slack_target_details(url):
     }
 
 
+def _post_to_slack(url, msg):
+    r = requests.post(url, json={'text': msg}, timeout=10)
+    r.raise_for_status()
+
+
+def _log_http_error(exc):
+    payload = ''
+    status = getattr(exc.response, 'status_code', 'no-status')
+    if exc.response is not None:
+        payload = (exc.response.text or '').strip()
+    logger.error('slack err status=%s payload=%s', status, payload)
+
+
 def slack(msg):
     raw_url = ENV.get('SLACK_URL') or ''
-    url = raw_url.strip().strip('"').strip("'")
+    trimmed = raw_url.strip()
+    url = trimmed.strip('"').strip("'")
     if not url:
         logger.warning('slack skipped: no webhook url configured')
         return False
     if url != raw_url:
-        logger.debug('slack webhook url normalised (whitespace trimmed)')
+        logger.debug('slack webhook url normalised (whitespace/quotes trimmed)')
     details = _slack_target_details(url)
     if details and logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -86,14 +100,25 @@ def slack(msg):
             len(msg or ''),
         )
     try:
-        r = requests.post(url, json={'text': msg}, timeout=10)
-        r.raise_for_status()
+        _post_to_slack(url, msg)
         return True
     except requests.exceptions.HTTPError as exc:
-        payload = ''
-        if exc.response is not None:
-            payload = (exc.response.text or '').strip()
-        logger.error('slack err status=%s payload=%s', getattr(exc.response, 'status_code', 'no-status'), payload)
+        if exc.response is not None and exc.response.status_code == 404 and raw_url != url:
+            logger.warning('slack normalised URL returned 404, retrying original formatting')
+            try:
+                _post_to_slack(raw_url, msg)
+                logger.info('slack delivered using original URL formatting')
+                return True
+            except requests.exceptions.HTTPError as retry_exc:
+                _log_http_error(retry_exc)
+                return False
+            except requests.exceptions.RequestException:
+                logger.exception('slack err request-exception on retry')
+                return False
+            except Exception:
+                logger.exception('slack err unexpected on retry')
+                return False
+        _log_http_error(exc)
         return False
     except requests.exceptions.RequestException:
         logger.exception('slack err request-exception')
