@@ -2,10 +2,11 @@ import os, re, time, csv, json, pickle, logging, imaplib, email, requests
 import argparse
 import sys
 from email.utils import parsedate_to_datetime
-from collections import defaultdict
+from collections import defaultdict, Counter
 from bs4 import BeautifulSoup
 import pathlib, dotenv
 from urllib.parse import urlparse
+import unicodedata
 
 BASE        = pathlib.Path(__file__).resolve().parent
 CFG_PATH    = BASE / 'parser_config.csv'
@@ -67,6 +68,41 @@ def _slack_target_details(url):
     }
 
 
+def _describe_hidden_chars(chars):
+    if not chars:
+        return ''
+    counter = Counter(chars)
+    parts = []
+    for ch, count in counter.items():
+        code = f'U+{ord(ch):04X}'
+        try:
+            name = unicodedata.name(ch)
+        except ValueError:
+            name = 'UNKNOWN'
+        if count > 1:
+            parts.append(f'{code} {name} x{count}')
+        else:
+            parts.append(f'{code} {name}')
+    return ', '.join(parts)
+
+
+def _normalise_slack_url(raw_url):
+    if not raw_url:
+        return '', []
+
+    trimmed = raw_url.strip().strip('"').strip("'").strip()
+    cleaned_chars = []
+    removed_chars = []
+    for ch in trimmed:
+        category = unicodedata.category(ch)
+        if ch.isspace() or category in {'Cf', 'Cc', 'Cs', 'Co'}:
+            removed_chars.append(ch)
+            continue
+        cleaned_chars.append(ch)
+    cleaned = ''.join(cleaned_chars)
+    return cleaned, removed_chars
+
+
 def _post_to_slack(url, msg):
     r = requests.post(url, json={'text': msg}, timeout=10)
     r.raise_for_status()
@@ -86,12 +122,20 @@ def slack(msg):
         logger.warning('slack skipped: no webhook url configured')
         return False
 
-    normalised = raw_url.strip().strip('"').strip("'")
+    normalised, removed_chars = _normalise_slack_url(raw_url)
     if normalised != raw_url:
-        logger.debug('slack webhook url normalised (whitespace/quotes trimmed)')
+        logger.debug('slack webhook url sanitised (quotes/whitespace/hidden chars trimmed)')
+    if removed_chars:
+        logger.debug('slack webhook sanitised removed_chars=%s', _describe_hidden_chars(removed_chars))
 
     if not normalised:
         logger.warning('slack skipped: webhook url empty after normalisation')
+        return False
+
+    try:
+        normalised.encode('ascii')
+    except UnicodeEncodeError:
+        logger.warning('slack skipped: webhook url still contains non-ASCII characters after sanitisation')
         return False
 
     details = _slack_target_details(normalised)
@@ -362,7 +406,10 @@ def cli():
     args = parser.parse_args()
 
     if args.slack_info:
-        info = _slack_target_details(ENV.get('SLACK_URL') or '')
+        cleaned_url, removed_chars = _normalise_slack_url(ENV.get('SLACK_URL') or '')
+        if removed_chars:
+            logger.debug('slack webhook sanitised removed_chars=%s', _describe_hidden_chars(removed_chars))
+        info = _slack_target_details(cleaned_url)
         if info:
             summary = (
                 f"Slack webhook host={info['host'] or 'unknown'} "
